@@ -9,17 +9,18 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="coverlet.collector" Version="6.0.4"/>
-        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.0"/>
-        <PackageReference Include="Testcontainers.ClickHouse" Version="4.12.0"/>
-        <PackageReference Include="Testcontainers.Kafka" Version="4.12.0"/>
-        <PackageReference Include="Testcontainers.MsSql" Version="4.12.0"/>
-        <PackageReference Include="Testcontainers.PostgreSql" Version="4.12.0"/>
-        <PackageReference Include="TUnit" Version="1.56.0"/>
+        <PackageReference Include="coverlet.collector" Version="6.0.4" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.0" />
+        <PackageReference Include="Microsoft.Testing.Extensions.TrxReport" Version="2.2.3" />
+        <PackageReference Include="Testcontainers.ClickHouse" Version="4.12.0" />
+        <PackageReference Include="Testcontainers.Kafka" Version="4.12.0" />
+        <PackageReference Include="Testcontainers.MsSql" Version="4.12.0" />
+        <PackageReference Include="Testcontainers.PostgreSql" Version="4.12.0" />
+        <PackageReference Include="TUnit" Version="1.56.0" />
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\src\XEventPipeline\XEventPipeline.csproj"/>
+        <ProjectReference Include="..\..\src\XEventPipeline\XEventPipeline.csproj" />
     </ItemGroup>
 
 </Project>
