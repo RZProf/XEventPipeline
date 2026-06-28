@@ -1,0 +1,45 @@
+﻿Settings:
+  BoundedCapacity: 100000
+
+SqlServer:
+  ConnectionString: test_connestion_string
+  Events:
+    - Package: sqlserver
+      Name: sp_statement_completed
+      CustomizableAttributes:
+        - Name: collect_statement
+          Value: 1
+      Actions:
+        - client_app_name
+        - client_hostname
+        - database_name
+        - query_hash
+        - username
+      PredicateExpression: "[duration]>= 5000000"
+    - Package: sqlserver
+      Name: sql_batch_completed
+      CustomizableAttributes:
+        - Name: collect_batch_text
+          Value: 1
+      Actions:
+        - client_app_name
+        - client_hostname
+        - database_name
+        - query_hash
+        - username
+      PredicateExpression: "[duration]>= 5000000"
+
+ClickHouse:
+  ConnectionString: test_connestion_string
+  BatchSize: 10000
+
+Postgres:
+  ConnectionString: test_connestion_string
+  BatchSize: 10000
+
+Kafka:
+  BrokerAddress: test_broker_address
+  Topic: topic_name
+  CompressionType: None
+  LingerMs: 5
+  BatchSize: 10000

@@ -1,0 +1,80 @@
+name: Generate Cross-Platform Standalone Releases
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            output_name: XEPipeline-windows-x64.exe
+            binary_name: XEventPipeline.exe
+          - os: ubuntu-latest
+            rid: linux-x64
+            output_name: XEPipeline-linux-x64
+            binary_name: XEventPipeline
+          - os: macos-latest
+            rid: osx-x64
+            output_name: XEPipeline-macos-intel
+            binary_name: XEventPipeline
+          - os: macos-latest
+            rid: osx-arm64
+            output_name: XEPipeline-macos-arm64
+            binary_name: XEventPipeline
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 10 SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Publish Single-File Binary
+      run: |
+        dotnet publish src/XEventPipeline/XEventPipeline.csproj -c Release -r ${{ matrix.rid }} --self-contained true /p:PublishSingleFile=true /p:CopyOutputSymbolsToPublishDirectory=false -o ./publish
+
+    - name: Rename Asset
+      shell: bash
+      run: |
+        mv ./publish/${{ matrix.binary_name }} ./${{ matrix.output_name }}
+
+    - name: Upload Intermediary Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.rid }}-artifact
+        path: ./${{ matrix.output_name }}
+
+  release:
+    name: Create GitHub Release
+    needs: build # Waits until all 4 builds successfully complete
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*-artifact'
+        merge-multiple: true
+
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          XEPipeline-windows-x64.exe
+          XEPipeline-linux-x64
+          XEPipeline-macos-intel
+          XEPipeline-macos-arm64
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
