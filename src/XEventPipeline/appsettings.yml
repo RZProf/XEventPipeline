@@ -4,29 +4,27 @@
 SqlServer:
   ConnectionString: test_connestion_string
   Events:
-    - Package: sqlserver
-      Name: sp_statement_completed
+    - Name: sqlserver.sp_statement_completed
       CustomizableAttributes:
         - Name: collect_statement
           Value: 1
       Actions:
-        - client_app_name
-        - client_hostname
-        - database_name
-        - query_hash
-        - username
+        - sqlserver.client_app_name
+        - sqlserver.client_hostname
+        - sqlserver.database_name
+        - sqlserver.query_hash
+        - sqlserver.username
       PredicateExpression: "[duration]>= 5000000"
-    - Package: sqlserver
-      Name: sql_batch_completed
+    - Name: sqlserver.sql_batch_completed
       CustomizableAttributes:
         - Name: collect_batch_text
           Value: 1
       Actions:
-        - client_app_name
-        - client_hostname
-        - database_name
-        - query_hash
-        - username
+        - sqlserver.client_app_name
+        - sqlserver.client_hostname
+        - sqlserver.database_name
+        - sqlserver.query_hash
+        - sqlserver.username
       PredicateExpression: "[duration]>= 5000000"
 
 ClickHouse:

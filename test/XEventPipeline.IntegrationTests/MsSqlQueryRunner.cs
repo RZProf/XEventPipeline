@@ -8,7 +8,13 @@ public abstract class MsSqlQueryRunner
     {
         await Task.WhenAll(Enumerable.Range(0, count).Select(async _ =>
         {
-            await using var sqlConnection = new SqlConnection(connectionString);
+            var sqlConnectionStringBuilder = new SqlConnectionStringBuilder(connectionString)
+            {
+                ApplicationName = "XEventPipeline.IntegrationTests",
+                ApplicationIntent = ApplicationIntent.ReadOnly
+            };
+
+            await using var sqlConnection = new SqlConnection(sqlConnectionStringBuilder.ConnectionString);
             await sqlConnection.OpenAsync(cancellationToken);
 
             var delay = TimeSpan.FromSeconds(Random.Shared.Next(6, 10)).ToString("g");

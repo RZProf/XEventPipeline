@@ -7,10 +7,10 @@ namespace XEventPipeline.IntegrationTests;
 
 public class XEventPipelinePostgresIntegrationTest
 {
-    private readonly PostgreSqlContainer _postgresContainer = new PostgreSqlBuilder("postgres:16").Build();
-
     private readonly MsSqlContainer _msSqlContainer =
         new MsSqlBuilder("mcr.microsoft.com/mssql/server:2025-latest").Build();
+
+    private readonly PostgreSqlContainer _postgresContainer = new PostgreSqlBuilder("postgres:16").Build();
 
     [Before(Test)]
     public async Task Before()
@@ -31,26 +31,24 @@ public class XEventPipelinePostgresIntegrationTest
             { "Postgres:BatchSize", "10" },
             { "Postgres:ConnectionString", postgresConnectionString },
             { "SqlServer:ConnectionString", msSqlConnectionString },
-            { "SqlServer:Events:0:Package", "sqlserver" },
-            { "SqlServer:Events:0:Name", "sp_statement_completed" },
+            { "SqlServer:Events:0:Name", "sqlserver.sp_statement_completed" },
             { "SqlServer:Events:0:PredicateExpression", "[duration]>= 5000000" },
             { "SqlServer:Events:0:CustomizableAttributes:0:Name", "collect_statement" },
             { "SqlServer:Events:0:CustomizableAttributes:0:Value", "1" },
-            { "SqlServer:Events:0:Actions:0", "client_app_name" },
-            { "SqlServer:Events:0:Actions:1", "client_hostname" },
-            { "SqlServer:Events:0:Actions:2", "database_name" },
-            { "SqlServer:Events:0:Actions:3", "query_hash" },
-            { "SqlServer:Events:0:Actions:4", "username" },
-            { "SqlServer:Events:1:Package", "sqlserver" },
-            { "SqlServer:Events:1:Name", "sql_batch_completed" },
+            { "SqlServer:Events:0:Actions:0", "sqlserver.client_app_name" },
+            { "SqlServer:Events:0:Actions:1", "sqlserver.client_hostname" },
+            { "SqlServer:Events:0:Actions:2", "sqlserver.database_name" },
+            { "SqlServer:Events:0:Actions:3", "sqlserver.query_hash" },
+            { "SqlServer:Events:0:Actions:4", "sqlserver.username" },
+            { "SqlServer:Events:1:Name", "sqlserver.sql_batch_completed" },
             { "SqlServer:Events:1:PredicateExpression", "[duration]>= 5000000" },
             { "SqlServer:Events:1:CustomizableAttributes:0:Name", "collect_batch_text" },
             { "SqlServer:Events:1:CustomizableAttributes:0:Value", "1" },
-            { "SqlServer:Events:1:Actions:0", "client_app_name" },
-            { "SqlServer:Events:1:Actions:1", "client_hostname" },
-            { "SqlServer:Events:1:Actions:2", "database_name" },
-            { "SqlServer:Events:1:Actions:3", "query_hash" },
-            { "SqlServer:Events:1:Actions:4", "username" }
+            { "SqlServer:Events:1:Actions:0", "sqlserver.client_app_name" },
+            { "SqlServer:Events:1:Actions:1", "sqlserver.client_hostname" },
+            { "SqlServer:Events:1:Actions:2", "sqlserver.database_name" },
+            { "SqlServer:Events:1:Actions:3", "sqlserver.query_hash" },
+            { "SqlServer:Events:1:Actions:4", "sqlserver.username" }
         };
 
         var host = Program.CreateHostBuilder([])

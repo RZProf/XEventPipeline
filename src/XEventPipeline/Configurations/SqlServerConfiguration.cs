@@ -19,8 +19,6 @@ public class XEventConfiguration
 {
     public required string Name { get; set; }
 
-    public required string Package { get; set; }
-
     public required string[] Actions { get; set; }
 
     public XEventCustomizableAttributeConfiguration[] CustomizableAttributes { get; set; } = [];
@@ -29,7 +27,6 @@ public class XEventConfiguration
 
     public override string ToString()
     {
-        var actions = string.Join(',', Actions.Select(action => $"{Package}.{action}"));
         var customizableAttributes = CustomizableAttributes.Length != 0
             ? $"{Environment.NewLine}SET {string.Join(',', CustomizableAttributes)}"
             : null;
@@ -39,8 +36,8 @@ public class XEventConfiguration
             : $"{Environment.NewLine}WHERE ({PredicateExpression})";
 
         return $"""
-                EVENT {Package}.{Name}({customizableAttributes}
-                ACTION({actions}){predicateExpression})
+                EVENT {Name}({customizableAttributes}
+                ACTION({string.Join(',', Actions)}){predicateExpression})
                 """;
     }
 }

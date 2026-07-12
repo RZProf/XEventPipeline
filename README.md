@@ -18,14 +18,14 @@ XEventPipeline fills that gap. It manages the XEvent session for you, reads the 
 
 ## How it works
 
-On startup the service creates (or recreates) an XEvent session on the target SQL Server instance according to the events declared in `appsettings.yml`. It then opens a live stream via `XELiteEventStreamer` and writes each event into a bounded in-memory channel. A sink service reads from that channel and bulk-inserts or produces the events to the chosen destination.
+On startup the service creates (or recreates) an XEvent session on the target SQL Server instance according to the events declared in `appsettings.yml`. It then opens a live stream via `XELiteEventStreamer` and writes each event into an `XEventBuffer` — a bounded in-memory channel wrapped with pooled-array batching and in-flight tracking. A sink service reads batches from that buffer and bulk-inserts or produces the events to the chosen destination.
 
 ```
 SQL Server XEvent session
         │
         ▼
   XEventStreamer (hosted service)
-        │  bounded channel (default 100 000 events)
+        │  XEventBuffer (bounded channel, default 100 000 events)
         ▼
   Sink (one of):
     ├── ClickHouseXEventSink  → ClickHouse table
@@ -34,6 +34,8 @@ SQL Server XEvent session
 ```
 
 All three layers use Polly for automatic retries with exponential back-off so transient connectivity failures self-heal without operator intervention. The XEvent session is also self-healing: if the stream drops, the streamer verifies the session is still alive before reconnecting.
+
+The pipeline is instrumented with OpenTelemetry — traces, metrics, and logs (including SQL client and sink-specific instrumentation) are exported over OTLP, and a custom `xeventpipeline.queue.size` gauge reports how many events are currently sitting in the buffer awaiting processing.
 
 ## Prerequisites
 
@@ -53,20 +55,18 @@ SqlServer:
   ConnectionString: "<connection string>"
   SessionName: xe_pipeline       # optional, defaults to "xe_pipeline"
   Events:
-    - Package: sqlserver
-      Name: sp_statement_completed
+      Name: sqlserver.sp_statement_completed
       CustomizableAttributes:
         - Name: collect_statement
           Value: 1
       Actions:
-        - client_app_name
-        - client_hostname
-        - database_name
-        - query_hash
-        - username
+        - sqlserver.client_app_name
+        - sqlserver.client_hostname
+        - sqlserver.database_name
+        - sqlserver.query_hash
+        - sqlserver.username
       PredicateExpression: "[duration]>= 5000000"  # optional WHERE clause
-    - Package: sqlserver
-      Name: sql_batch_completed
+      Name: sqlserver.sql_batch_completed
       # ...
 
 # --- Pick exactly ONE sink ---
@@ -132,11 +132,13 @@ dotnet test test/XEventPipeline.IntegrationTests
 ```
 src/
   XEventPipeline/
-    Program.cs                        # host setup & sink selection
-    XEventStreamer.cs                  # reads from SQL Server, writes to channel
+    Program.cs                        # host builder entry point
+    ServiceCollectionExtensions.cs    # DI wiring: buffer, sinks, OpenTelemetry
+    XEventPipelineDiagnostics.cs      # custom metrics (e.g. queue size gauge)
+    XEventStreamer.cs                  # reads from SQL Server, writes to the buffer
     XEventSessionManager.cs           # creates/drops the XEvent session
     XEventSessionQueries.cs           # DDL query builders
-    ChannelExtensions.cs              # batching helpers for ChannelReader
+    XEventBuffer/                     # bounded channel + pooled-array batching
     Configurations/                   # strongly-typed config classes
     XEventSinks/
       ClickHouse/                     # ClickHouse sink + encoder + queries
@@ -158,3 +160,7 @@ test/
 | `Polly.Core` | Resilience & retry pipelines |
 | `SpanJson` | High-performance JSON serialisation (Kafka sink) |
 | `NetEscapades.Configuration.Yaml` | YAML configuration provider |
+| `OpenTelemetry.Extensions.Hosting` | Traces, metrics & logs wiring |
+| `OpenTelemetry.Exporter.OpenTelemetryProtocol` | OTLP exporter |
+| `OpenTelemetry.Instrumentation.SqlClient` | SQL Server call instrumentation |
+| `Confluent.Kafka.Extensions.Diagnostics` | Kafka producer tracing |

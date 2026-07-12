@@ -67,12 +67,13 @@ public class PersistedXEvent : IEquatable<PersistedXEvent>
         hash.Add(XEventStartOffsetInBytes);
         hash.Add(XEventEndOffsetInBytes);
         hash.Add(XEventSizeInBytes);
-        
+
         foreach (var kvp in Fields.OrderBy(k => k.Key))
         {
             hash.Add(kvp.Key);
             hash.Add(kvp.Value);
         }
+
         foreach (var kvp in Actions.OrderBy(k => k.Key))
         {
             hash.Add(kvp.Key);

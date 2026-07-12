@@ -25,7 +25,7 @@ public static class ClickHouseXEventEncoder
 
         try
         {
-            var maxRowSize = 16 + 5 + nameByteCount + 4 + 24 + 5 + actions.Count + 5 + fields.Count;
+            var maxRowSize = 16 + 5 + nameByteCount + 8 + 24 + 5 + actions.Count + 5 + fields.Count;
 
             var memory = writer.GetMemory(maxRowSize);
             var span = memory.Span;
@@ -37,8 +37,8 @@ public static class ClickHouseXEventEncoder
             Encoding.UTF8.GetBytes(xEvent.Name, span[bytesWritten..]);
             bytesWritten += nameByteCount;
 
-            BinaryPrimitives.WriteUInt32LittleEndian(span[bytesWritten..], (uint)xEvent.Timestamp.ToUnixTimeSeconds());
-            bytesWritten += 4;
+            BinaryPrimitives.WriteInt64LittleEndian(span[bytesWritten..], xEvent.Timestamp.ToUnixTimeMilliseconds());
+            bytesWritten += 8;
 
             BinaryPrimitives.WriteInt64LittleEndian(span[bytesWritten..], xEvent.XEventStartOffsetInBytes);
             bytesWritten += 8;
