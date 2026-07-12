@@ -2,15 +2,14 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Data;
 using System.IO.Pipelines;
-using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Microsoft.SqlServer.XEvent.XELite;
 using Npgsql;
 using Polly;
 using Polly.Retry;
 using XEventPipeline.Configurations;
+using XEventPipeline.XEventBuffer;
 
 namespace XEventPipeline.XEventSinks.Postgres;
 
@@ -33,18 +32,18 @@ public class PostgresXEventSink : IHostedLifecycleService
     private readonly PostgresConfiguration _configuration;
     private readonly ILogger<PostgresXEventSink> _logger;
     private readonly ResiliencePipeline _resiliencePipeline;
-    private readonly ChannelReader<IXEvent> _xEventReader;
+    private readonly XEventBufferReader _xEventBufferReader;
+    private Task? _copyBackgroundTask;
 
     private Task? _createPartitionsBackgroundTask;
-    private Task? _copyBackgroundTask;
 
     public PostgresXEventSink(
         IOptions<PostgresConfiguration> configuration,
-        ChannelReader<IXEvent> xEventReader,
+        XEventBufferReader xEventBufferReader,
         ILogger<PostgresXEventSink> logger)
     {
         _configuration = configuration.Value;
-        _xEventReader = xEventReader;
+        _xEventBufferReader = xEventBufferReader;
         _logger = logger;
 
         _cancellationTokenSource = new CancellationTokenSource();
@@ -127,7 +126,7 @@ public class PostgresXEventSink : IHostedLifecycleService
 
     public async Task StoppingAsync(CancellationToken cancellationToken)
     {
-        await _xEventReader.Completion;
+        await _xEventBufferReader.Completion.WaitAsync(cancellationToken);
         await _cancellationTokenSource.CancelAsync();
     }
 
@@ -151,23 +150,19 @@ public class PostgresXEventSink : IHostedLifecycleService
 
                         await using var npgsqlConnection = new NpgsqlConnection(config.ConnectionString);
                         await npgsqlConnection.OpenAsync(cancellationToken);
-    
-                        using var npgsqlCmd = npgsqlConnection.CreateCommand();
+
+                        await using var npgsqlCmd = npgsqlConnection.CreateCommand();
                         npgsqlCmd.CommandType = CommandType.Text;
 
-                        var today = DateTime.UtcNow;
-                        npgsqlCmd.CommandText = PostgresQueries.CreatePartition(config.Table, today);
+                        var now = DateTime.UtcNow;
+                        npgsqlCmd.CommandText = PostgresQueries.CreatePartition(config.Table, now);
                         await npgsqlCmd.ExecuteNonQueryAsync(cancellationToken);
-                        logger.LogInformation("Partition verified/created for today: {Date}", today.ToString("yyyy-MM-dd"));
 
-                        var tomorrow = today.AddDays(1);
-                        npgsqlCmd.CommandText = PostgresQueries.CreatePartition(config.Table, tomorrow);
-                        await npgsqlCmd.ExecuteNonQueryAsync(cancellationToken);
-                        logger.LogInformation("Partition verified/created for tomorrow: {Date}", tomorrow.ToString("yyyy-MM-dd"));
+                        if (logger.IsEnabled(LogLevel.Information))
+                            logger.LogInformation("Partitions verified/created for {Date}", now.ToString("yyyy-MM-dd"));
                     },
                     (_logger, _configuration),
                     _cancellationTokenSource.Token);
-                
             } while (await timer.WaitForNextTickAsync(_cancellationTokenSource.Token));
         }
         catch (Exception e) when (e is TaskCanceledException or OperationCanceledException)
@@ -235,8 +230,8 @@ public class PostgresXEventSink : IHostedLifecycleService
                                 await npgsqlConnection.OpenAsync(token);
 
                                 await using var dbStream = await npgsqlConnection.BeginRawBinaryCopyAsync(
-                                        string.Format(PostgresQueries.Copy, config.Table),
-                                        token);
+                                    string.Format(PostgresQueries.Copy, config.Table),
+                                    token);
 
                                 await pipe.Reader.CopyToAsync(dbStream, token);
                             }, token);
@@ -251,7 +246,7 @@ public class PostgresXEventSink : IHostedLifecycleService
                             }
                         });
                 },
-                (_xEventReader, _logger, _configuration),
+                (_xEventBufferReader, _logger, _configuration),
                 _cancellationTokenSource.Token);
         }
         catch (Exception e) when (e is TaskCanceledException or OperationCanceledException)

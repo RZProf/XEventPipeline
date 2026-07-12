@@ -1,6 +1,6 @@
 ﻿using System.Buffers;
-using System.Threading.Channels;
 using Confluent.Kafka;
+using Confluent.Kafka.Extensions.Diagnostics;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,6 +9,7 @@ using Polly;
 using Polly.Retry;
 using SpanJson;
 using XEventPipeline.Configurations;
+using XEventPipeline.XEventBuffer;
 
 namespace XEventPipeline.XEventSinks.Kafka;
 
@@ -17,15 +18,15 @@ public class KafkaXEventSink : IHostedService
     private readonly CancellationTokenSource _cancellationTokenSource;
     private readonly ILogger<KafkaXEventSink> _logger;
     private readonly Task _produceBackgroundTask;
-    private readonly ChannelReader<IXEvent> _xEventReader;
     private readonly IProducer<Null, ArraySegment<byte>> _producer;
+    private readonly XEventBufferReader _xEventBufferReader;
 
     public KafkaXEventSink(
         IOptions<KafkaConfiguration> configuration,
-        ChannelReader<IXEvent> xEventReader,
+        XEventBufferReader xEventBufferReader,
         ILogger<KafkaXEventSink> logger)
     {
-        _xEventReader = xEventReader;
+        _xEventBufferReader = xEventBufferReader;
         _logger = logger;
 
         _cancellationTokenSource = new CancellationTokenSource();
@@ -113,14 +114,13 @@ public class KafkaXEventSink : IHostedService
             })
             .SetStatisticsHandler((p, json) =>
             {
-                // Better yet: Pass 'json' to a metrics library, not a text logger!
                 if (logger.IsEnabled(LogLevel.Debug))
                     logger.LogDebug("Kafka Producer Stats - Name: {Name}, Data: {Json}", p.Name, json);
             })
             .SetValueSerializer(new ArraySegmentSerializer())
-            .Build();
+            .BuildWithInstrumentation();
 
-        _produceBackgroundTask = Parallel.ForEachAsync(_xEventReader.ReadAllAsync(_cancellationTokenSource.Token),
+        _produceBackgroundTask = Parallel.ForEachAsync(_xEventBufferReader.ReadAllAsync(_cancellationTokenSource.Token),
             new ParallelOptions
             {
                 CancellationToken = _cancellationTokenSource.Token,
@@ -160,7 +160,7 @@ public class KafkaXEventSink : IHostedService
     {
         try
         {
-            await _xEventReader.Completion.WaitAsync(cancellationToken);
+            await _xEventBufferReader.Completion.WaitAsync(cancellationToken);
             _producer.Flush(cancellationToken);
             await _produceBackgroundTask.WaitAsync(cancellationToken);
             await _cancellationTokenSource.CancelAsync();

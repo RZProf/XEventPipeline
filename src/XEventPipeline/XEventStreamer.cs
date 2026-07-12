@@ -1,5 +1,4 @@
-﻿using System.Threading.Channels;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -7,6 +6,7 @@ using Microsoft.SqlServer.XEvent.XELite;
 using Polly;
 using Polly.Retry;
 using XEventPipeline.Configurations;
+using XEventPipeline.XEventBuffer;
 
 namespace XEventPipeline;
 
@@ -17,14 +17,14 @@ public class XEventStreamer : IHostedLifecycleService
     private readonly ILogger<XEventStreamer> _logger;
     private readonly ResiliencePipeline _resiliencePipeline;
     private readonly IXEventSessionManager _xEventSessionManager;
-    private readonly ChannelWriter<IXEvent> _xEventWriter;
+    private readonly XEventBufferWriter _xEventWriter;
 
     private Task? _streamingLoop;
 
     public XEventStreamer(
         IOptions<SqlServerConfiguration> configuration,
         IXEventSessionManager xEventSessionManager,
-        ChannelWriter<IXEvent> xEventWriter,
+        XEventBufferWriter xEventWriter,
         ILogger<XEventStreamer> logger)
     {
         _configuration = configuration.Value;

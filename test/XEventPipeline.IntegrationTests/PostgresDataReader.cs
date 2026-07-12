@@ -22,22 +22,20 @@ public static class PostgresDataReader
             var reader = await npgsqlConnection.ExecuteReaderAsync($"SELECT * FROM {table};");
 
             while (await reader.ReadAsync(cancellationToken))
-            {
                 if (data.Add(new PersistedXEvent
                     {
-                        Uuid = reader.GetGuid(0),
-                        Name = reader.GetString(1),
-                        Timestamp = reader.GetDateTime(2),
-                        XEventStartOffsetInBytes = reader.GetInt64(3),
-                        XEventEndOffsetInBytes = reader.GetInt64(4),
-                        XEventSizeInBytes = reader.GetInt64(5),
-                        Actions = JsonSerializer.Deserialize<Dictionary<string, object>>(reader.GetString(6)) ??
+                        Uuid = reader.GetGuid(1),
+                        Name = reader.GetString(2),
+                        Timestamp = reader.GetDateTime(3),
+                        XEventStartOffsetInBytes = reader.GetInt64(4),
+                        XEventEndOffsetInBytes = reader.GetInt64(5),
+                        XEventSizeInBytes = reader.GetInt64(6),
+                        Actions = JsonSerializer.Deserialize<Dictionary<string, object>>(reader.GetString(7)) ??
                                   new Dictionary<string, object>(),
-                        Fields = JsonSerializer.Deserialize<Dictionary<string, object>>(reader.GetString(7)) ??
+                        Fields = JsonSerializer.Deserialize<Dictionary<string, object>>(reader.GetString(8)) ??
                                  new Dictionary<string, object>()
                     }))
                     recordsAffected++;
-            }
         }
 
         return data.ToArray();

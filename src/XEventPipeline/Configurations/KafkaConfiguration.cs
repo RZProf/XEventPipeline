@@ -47,8 +47,6 @@ public class KafkaConfiguration
 
     public int ProduceTimeout { get; init; } = 1000;
 
-    public string? DateTimeFormatString { get; init; }
-
     public double LingerMs { get; init; } = 0.5;
 
     public int BatchSize { get; init; } = 1_000_000;

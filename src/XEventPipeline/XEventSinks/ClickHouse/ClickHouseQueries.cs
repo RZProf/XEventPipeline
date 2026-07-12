@@ -3,19 +3,21 @@
 public static class ClickHouseQueries
 {
     public const string CreateTable = """
-                                      CREATE TABLE IF NOT EXISTS {0}
+                                      CREATE TABLE IF NOT EXISTS {0} 
                                       (
                                           `UUID` UUID,
-                                          Name String,
-                                          Timestamp DateTime,
-                                          XEventStartOffsetInBytes  Int64,
+                                          Name LowCardinality(String),
+                                          `Date` Date DEFAULT toDate(Timestamp),
+                                          Timestamp DateTime64(3, 'UTC'),
+                                          XEventStartOffsetInBytes Int64,
                                           XEventEndOffsetInBytes Int64,
                                           XEventSizeInBytes Int64,
                                           Actions JSON,
                                           Fields JSON
                                       )
                                       ENGINE = MergeTree()
-                                      ORDER BY (`UUID`)
+                                      PARTITION BY toYYYYMM(`Date`)
+                                      ORDER BY (`Date`, `UUID`, Timestamp);
                                       """;
 
     public const string Insert = """

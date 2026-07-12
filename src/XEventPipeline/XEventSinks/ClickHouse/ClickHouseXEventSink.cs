@@ -1,15 +1,15 @@
 ﻿using System.Buffers;
 using System.IO.Compression;
 using System.IO.Pipelines;
-using System.Threading.Channels;
 using ClickHouse.Driver;
+using ClickHouse.Driver.ADO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Microsoft.SqlServer.XEvent.XELite;
 using Polly;
 using Polly.Retry;
 using XEventPipeline.Configurations;
+using XEventPipeline.XEventBuffer;
 
 namespace XEventPipeline.XEventSinks.ClickHouse;
 
@@ -24,20 +24,22 @@ public class ClickHouseXEventSink : IHostedLifecycleService
     private readonly CancellationTokenSource _cancellationTokenSource;
     private readonly ClickHouseConfiguration _configuration;
     private readonly ILogger<ClickHouseXEventSink> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly ResiliencePipeline _resiliencePipeline;
 
-    private readonly ChannelReader<IXEvent> _xEventReader;
+    private readonly XEventBufferReader _xEventBufferReader;
 
     private Task? _insertBackgroundTask;
 
     public ClickHouseXEventSink(
         IOptions<ClickHouseConfiguration> configuration,
-        ChannelReader<IXEvent> xEventReader,
-        ILogger<ClickHouseXEventSink> logger)
+        XEventBufferReader xEventBufferReader,
+        ILoggerFactory loggerFactory)
     {
         _configuration = configuration.Value;
-        _xEventReader = xEventReader;
-        _logger = logger;
+        _xEventBufferReader = xEventBufferReader;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<ClickHouseXEventSink>();
 
         _cancellationTokenSource = new CancellationTokenSource();
 
@@ -98,9 +100,11 @@ public class ClickHouseXEventSink : IHostedLifecycleService
             {
                 using ClickHouseClient clickHouseClient = new(configuration.ConnectionString);
 
-                var format = string.Format(ClickHouseQueries.CreateTable, configuration.Table);
                 await clickHouseClient.ExecuteNonQueryAsync(
-                    format, null, null, token);
+                    string.Format(ClickHouseQueries.CreateTable, configuration.Table),
+                    null,
+                    null,
+                    token);
             },
             _configuration,
             cancellationToken);
@@ -113,7 +117,7 @@ public class ClickHouseXEventSink : IHostedLifecycleService
 
     public async Task StoppingAsync(CancellationToken cancellationToken)
     {
-        await _xEventReader.Completion;
+        await _xEventBufferReader.Completion.WaitAsync(cancellationToken);
         await _cancellationTokenSource.CancelAsync();
     }
 
@@ -128,9 +132,13 @@ public class ClickHouseXEventSink : IHostedLifecycleService
         {
             await _resiliencePipeline.ExecuteAsync(static async (state, cancellationToken) =>
                 {
-                    var (xEventReader, logger, config) = state;
+                    var (xEventReader, loggerFactory, logger, config) = state;
 
-                    using ClickHouseClient clickHouseClient = new(config.ConnectionString);
+                    using ClickHouseClient clickHouseClient = new(new ClickHouseClientSettings(config.ConnectionString)
+                    {
+                        UseCompression = config.Compression == ClickHouseCompression.GZip,
+                        LoggerFactory = loggerFactory
+                    });
 
                     await Parallel.ForEachAsync(
                         xEventReader.IntoBatches(config.BatchSize, cancellationToken),
@@ -155,7 +163,7 @@ public class ClickHouseXEventSink : IHostedLifecycleService
                                             ClickHouseCompression.GZip => new GZipStream(
                                                 pipeWriterStream,
                                                 CompressionMode.Compress,
-                                                leaveOpen: true),
+                                                true),
                                             _ => pipeWriterStream
                                         };
 
@@ -212,7 +220,7 @@ public class ClickHouseXEventSink : IHostedLifecycleService
                             }
                         });
                 },
-                (XEventReader: _xEventReader, Logger: _logger, Config: _configuration),
+                (_xEventBufferReader, _loggerFactory, _logger, _configuration),
                 _cancellationTokenSource.Token);
         }
         catch (Exception e) when (e is TaskCanceledException or OperationCanceledException)
