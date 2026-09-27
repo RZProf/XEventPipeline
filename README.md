@@ -1,166 +1,222 @@
-# XEventPipeline
+# XEventPipeline: SQL Server Extended Events to Kafka, ClickHouse, and PostgreSQL
 
-A .NET 10 background service that streams SQL Server Extended Events (XEvents) in real time and forwards them to a configurable sink — ClickHouse, PostgreSQL, or Kafka.
+[![Continuous Integration](https://github.com/RZProf/XEventPipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/RZProf/XEventPipeline/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/RZProf/XEventPipeline)](https://github.com/RZProf/XEventPipeline/releases/latest)
 
-## Motivation
+**XEventPipeline is a .NET 10 SQL Server Extended Events (XEvents/XE) streaming service.** It creates and manages a SQL Server event session, reads events as they occur, and sends them to exactly one destination: ClickHouse, PostgreSQL, or Apache Kafka.
 
-SQL Server Extended Events is the recommended low-overhead tracing mechanism in SQL Server, but getting that data into a modern analytics or observability stack is non-trivial. The older SQL Profiler approach is deprecated and imposes significant server-side overhead. XEvents themselves are lightweight, yet the out-of-the-box tooling only writes to files or ring buffers — there is no built-in way to stream events continuously to an external system.
+Configure the pipeline with YAML or use its built-in Blazor setup page to browse the SQL Server event catalog, choose events and actions, set predicates, enter connection details, and save `appsettings.yml`. The setup UI lives in a Razor class library and runs inside the executable’s minimal web host only in configure mode; normal startup remains a console worker.
 
-XEventPipeline fills that gap. It manages the XEvent session for you, reads the live stream with near-zero overhead, and routes every event to a sink you already operate — without requiring any agents, linked servers, or proprietary add-ons.
+## Features
 
-## Use cases
+- Stream SQL Server Extended Events in real time with [XELite](https://github.com/microsoft/sql-server-xevent)
+- Select multiple event types, event-specific settings, actions, and predicate expressions
+- Send each event’s metadata, actions, and data fields to ClickHouse, PostgreSQL, or Kafka
+- Create destination tables automatically for ClickHouse and PostgreSQL
+- Buffer and batch events in memory, with retry and reconnect handling
+- Export traces, metrics, and logs over OpenTelemetry Protocol (OTLP)
+- Configure the pipeline in a browser or edit YAML directly
 
-- **Slow query detection** — capture `sp_statement_completed` or `sql_batch_completed` events filtered by duration and feed them to ClickHouse or PostgreSQL for real-time dashboards and alerting.
-- **Query analytics** — aggregate query hashes, execution counts, and durations over time to identify regressions or understand workload patterns.
-- **Audit logging** — record `sql_statement_completed`, login events, or DDL changes to an append-only store for compliance and forensics.
-- **Security monitoring** — stream failed login attempts or privilege-escalation events into a Kafka topic consumed by a SIEM or alerting pipeline.
-- **Capacity planning** — collect long-running statistics on blocking, waits, and I/O to inform index tuning and infrastructure sizing decisions.
+Common use cases include SQL Server query performance monitoring, slow statement analysis, workload analytics, audit logging, and routing database events to Kafka-based observability or security systems.
 
 ## How it works
 
-On startup the service creates (or recreates) an XEvent session on the target SQL Server instance according to the events declared in `appsettings.yml`. It then opens a live stream via `XELiteEventStreamer` and writes each event into an `XEventBuffer` — a bounded in-memory channel wrapped with pooled-array batching and in-flight tracking. A sink service reads batches from that buffer and bulk-inserts or produces the events to the chosen destination.
+At startup, XEventPipeline creates or replaces its configured SQL Server Extended Events session and starts streaming events. A bounded in-memory channel passes events to one configured sink, which batches and writes them to the destination. If SQL Server or the sink becomes temporarily unavailable, the services retry with backoff.
 
+The event session uses SQL Server’s `ALLOW_SINGLE_EVENT_LOSS` retention mode. This permits SQL Server to drop an event under pressure instead of blocking the workload; this pipeline does not guarantee lossless capture.
+
+```text
+SQL Server Extended Events
+          │
+          ▼
+ Live stream → bounded buffer → one configured sink
+                              ├── ClickHouse table
+                              ├── PostgreSQL table
+                              └── Kafka topic
 ```
-SQL Server XEvent session
-        │
-        ▼
-  XEventStreamer (hosted service)
-        │  XEventBuffer (bounded channel, default 100 000 events)
-        ▼
-  Sink (one of):
-    ├── ClickHouseXEventSink  → ClickHouse table
-    ├── PostgresXEventSink    → PostgreSQL table
-    └── KafkaXEventSink       → Kafka topic
+
+ClickHouse and PostgreSQL store event metadata, actions, and fields in columns, with action and field values stored as JSON. Kafka receives a JSON event containing `UUID`, `Name`, `Timestamp`, XEvent offsets and size, `Actions`, and `Fields`.
+
+## Requirements and SQL Server permissions
+
+- .NET 10 SDK to build or run from source
+- A SQL Server instance reachable from the machine running XEventPipeline
+- One destination: ClickHouse, PostgreSQL, or Kafka
+- SQL credentials for the SQL Server connection
+
+The SQL Server login needs permission to read the Extended Events catalog and create, alter, and drop the server event session. For SQL Server 2019 and earlier, catalog DMV access requires `VIEW SERVER STATE`. For SQL Server 2022 and later, it requires `VIEW SERVER PERFORMANCE STATE`. Session permissions vary by SQL Server version: older versions use `ALTER ANY EVENT SESSION`; SQL Server 2022 and later support the more granular `CREATE ANY EVENT SESSION`, `ALTER ANY EVENT SESSION`, and `DROP ANY EVENT SESSION` permissions. See Microsoft’s documentation for [CREATE EVENT SESSION](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-event-session-transact-sql), [ALTER EVENT SESSION](https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-event-session-transact-sql), and [DROP EVENT SESSION](https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql).
+
+XEventPipeline creates a server-scoped session named `xe_pipeline` by default. It stops and drops that session when the host stops, and replaces an existing session with the same name at startup. Use a dedicated session name if you manage other Extended Events sessions on the server.
+
+## Quick start
+
+Clone the repository and start the Blazor configuration page:
+
+```bash
+git clone https://github.com/RZProf/XEventPipeline.git
+cd XEventPipeline
+dotnet run --project src/XEventPipeline -- --configure
 ```
 
-All three layers use Polly for automatic retries with exponential back-off so transient connectivity failures self-heal without operator intervention. The XEvent session is also self-healing: if the stream drops, the streamer verifies the session is still alive before reconnecting.
+Configure mode opens a browser tab. The page reads the existing `src/XEventPipeline/appsettings.yml` and pre-fills its SQL Server and sink settings. If the file is missing, setup starts with empty values; if it cannot be read, setup starts with empty values and shows a warning. Saving creates or replaces the file. Enter or update the SQL Server connection details, then choose **Connect and load events**. Search the catalog, select one or more event types, and configure predicates, customizable settings, and actions. Choose one sink, set the event buffer capacity (the maximum number of events held in memory while waiting for the sink), and save.
 
-The pipeline is instrumented with OpenTelemetry — traces, metrics, and logs (including SQL client and sink-specific instrumentation) are exported over OTLP, and a custom `xeventpipeline.queue.size` gauge reports how many events are currently sitting in the buffer awaiting processing.
+The event and action pickers search large SQL Server catalogs and display results in batches. When saving succeeds, the page shows the updated file path and the next step. Use **Edit again** to return to the form. When the last configure tab disconnects, the host waits five seconds for a reconnection before stopping; this gives a refreshed page time to reconnect. Close the tab after saving, then start the application without the configure flag:
 
-## Prerequisites
+```bash
+dotnet run --project src/XEventPipeline
+```
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- A running SQL Server instance with an account that has `ALTER ANY EVENT SESSION` permission
-- One of: ClickHouse, PostgreSQL, or a Kafka broker
+The setup page uses SQL Server’s catalog to show each event’s fields. SQL Server emits an event’s defined data fields automatically; event fields cannot be individually enabled or disabled in an Extended Events session definition. Use event predicates to filter captured events and actions to add action values.
 
-## Configuration
+## YAML configuration
 
-All configuration lives in `src/XEventPipeline/appsettings.yml`. Provide exactly **one** of the three sink sections (`ClickHouse`, `Postgres`, or `Kafka`); the application will fail fast if zero or more than one are present.
+The application reads `src/XEventPipeline/appsettings.yml` by default. Configure SQL Server and one sink section only. The following example is valid YAML for two events and a ClickHouse sink:
 
 ```yaml
 Settings:
-  BoundedCapacity: 100000       # in-memory channel buffer size
+  BoundedCapacity: 100000
 
 SqlServer:
-  ConnectionString: "<connection string>"
-  SessionName: xe_pipeline       # optional, defaults to "xe_pipeline"
+  ConnectionString: "Server=tcp:sql.example.net,1433;Database=master;User ID=xe_reader;Password=change-me;Encrypt=True;TrustServerCertificate=True"
+  SessionName: xe_pipeline
   Events:
-      Name: sqlserver.sp_statement_completed
+    - Name: sqlserver.sp_statement_completed
       CustomizableAttributes:
         - Name: collect_statement
-          Value: 1
+          Value: "1"
       Actions:
         - sqlserver.client_app_name
         - sqlserver.client_hostname
         - sqlserver.database_name
         - sqlserver.query_hash
         - sqlserver.username
-      PredicateExpression: "[duration]>= 5000000"  # optional WHERE clause
-      Name: sqlserver.sql_batch_completed
-      # ...
+      PredicateExpression: "[duration] >= 5000000"
+    - Name: sqlserver.sql_batch_completed
+      Actions:
+        - sqlserver.client_app_name
+      PredicateExpression: "[duration] >= 5000000"
 
-# --- Pick exactly ONE sink ---
-
+# Configure exactly one sink section.
 ClickHouse:
-  ConnectionString: "<connection string>"
-  Table: xe_data                 # optional, defaults to "xe_data"
+  ConnectionString: "Host=clickhouse.example.net;Port=8123;Database=default;Username=default;Password=change-me;Protocol=http"
+  Table: xe_data
   BatchSize: 10000
   MaxDegreeOfParallelism: 4
-  Compression: None              # None | GZip
+  Compression: None  # None or GZip
+```
 
+The SQL Server connection string should use the format supported by [`Microsoft.Data.SqlClient`](https://learn.microsoft.com/en-us/sql/connect/ado-net/connection-string-syntax). The setup page builds it from the server, port, database, SQL username, password, and certificate setting.
+
+### Sink options
+
+Choose one of these top-level sections:
+
+<details>
+<summary>ClickHouse</summary>
+
+```yaml
+ClickHouse:
+  ConnectionString: "Host=clickhouse.example.net;Port=8123;Database=default;Username=default;Password=change-me;Protocol=http"
+  Table: xe_data
+  BatchSize: 10000
+  MaxDegreeOfParallelism: 4
+  Compression: None  # None or GZip
+```
+
+XEventPipeline creates the table if it does not already exist. The configured database and table must be accessible to the ClickHouse user.
+</details>
+
+<details>
+<summary>PostgreSQL</summary>
+
+```yaml
 Postgres:
-  ConnectionString: "<connection string>"
-  Table: xe_data                 # optional, defaults to "xe_data"
+  ConnectionString: "Host=postgres.example.net;Port=5432;Database=xevents;Username=xe_writer;Password=change-me;SSL Mode=Prefer"
+  Table: xe_data
   BatchSize: 10000
   MaxDegreeOfParallelism: 4
+```
 
+XEventPipeline creates the partitioned table if needed and maintains daily partitions. The PostgreSQL user needs permission to create and write to the configured table.
+</details>
+
+<details>
+<summary>Kafka</summary>
+
+```yaml
 Kafka:
-  BrokerAddress: "<broker:port>"
-  Topic: "<topic>"
-  CompressionType: None          # None | Gzip | Snappy | Lz4 | Zstd
+  BrokerAddress: "kafka.example.net:9092"
+  Topic: sqlserver-xevents
+  CompressionType: None  # None, Gzip, Snappy, Lz4, or Zstd
   LingerMs: 5
   BatchSize: 10000
   MaxDegreeOfParallelism: 10
-  ProduceTimeout: 1000           # ms
-  DateTimeFormatString:          # optional custom format for DateTime fields
+  ProduceTimeout: 1000
 ```
 
-## Running
+</details>
 
-```bash
-# from the repository root
-dotnet run --project src/XEventPipeline
-```
+The setup page writes the selected sink’s connection string and options to the same YAML file used by normal application startup. Treat the file as sensitive: it can contain SQL Server and sink passwords. For deployments, protect its filesystem permissions and consider your environment’s supported secret-management approach.
 
-## Building
+## OpenTelemetry
+
+The service exports traces, metrics, and logs using the OpenTelemetry Protocol (OTLP). Configure the exporter with the standard OpenTelemetry environment variables, such as `OTEL_EXPORTER_OTLP_ENDPOINT`. The application also reports the `xeventpipeline.queue.size` metric for events waiting in the in-memory buffer.
+
+## Build and run
+
+Build the solution:
 
 ```bash
 dotnet build
 ```
 
-Self-contained single-file publish (example for Linux):
+Run the pipeline using the YAML file:
 
 ```bash
-dotnet publish src/XEventPipeline -c Release -r linux-x64 \
-  --self-contained true \
-  /p:PublishSingleFile=true \
-  /p:PublishReadyToRun=true
+dotnet run --project src/XEventPipeline
 ```
 
-Pre-built binaries for Windows (x64), Linux (x64), and macOS (ARM64) are attached to each [GitHub Release](../../releases).
-
-## Running the integration tests
-
-The integration tests in `test/XEventPipeline.IntegrationTests` require live instances of SQL Server and whichever sink(s) you want to exercise. Update the connection strings in the test project's `appsettings.yml`, then:
+Run only the configuration UI:
 
 ```bash
-dotnet test test/XEventPipeline.IntegrationTests
+dotnet run --project src/XEventPipeline -- --configure
 ```
+
+Publish a self-contained app for a specific runtime identifier (example: Linux x64):
+
+```bash
+dotnet publish src/XEventPipeline/XEventPipeline.csproj \
+  --configuration Release \
+  --runtime linux-x64 \
+  --self-contained true
+```
+
+Prebuilt release artifacts are available for Windows x64, Linux x64, and macOS x64/ARM64 on the [GitHub Releases page](https://github.com/RZProf/XEventPipeline/releases).
+
+## Integration tests
+
+The integration tests use Testcontainers to start SQL Server and the destination service in Docker. Docker must be installed and running. From the repository root, run:
+
+```bash
+dotnet test --project test/XEventPipeline.IntegrationTests/XEventPipeline.IntegrationTests.csproj --configuration Release
+```
+
+The tests exercise SQL Server streaming and each supported sink, so they may take several minutes to complete.
 
 ## Project structure
 
+```text
+src/XEventPipeline/
+  Configurations/             YAML-bound application settings
+  XEventBuffer/               Bounded channel and batch reader/writer
+  XEventSinks/                ClickHouse, PostgreSQL, and Kafka sinks
+  Program.cs                  Console host and --configure minimal web host
+  XEventSessionManager.cs     SQL Server session lifecycle
+  XEventSessionQueries.cs     Extended Events session SQL
+  XEventStreamer.cs           Live SQL Server event stream
+src/XEventPipeline.SetupUi/
+  Components/                Blazor setup page and event/action pickers
+  Setup/                      YAML file handling, connection strings, XE catalog
+test/XEventPipeline.IntegrationTests/
+                              Docker-backed end-to-end tests
 ```
-src/
-  XEventPipeline/
-    Program.cs                        # host builder entry point
-    ServiceCollectionExtensions.cs    # DI wiring: buffer, sinks, OpenTelemetry
-    XEventPipelineDiagnostics.cs      # custom metrics (e.g. queue size gauge)
-    XEventStreamer.cs                  # reads from SQL Server, writes to the buffer
-    XEventSessionManager.cs           # creates/drops the XEvent session
-    XEventSessionQueries.cs           # DDL query builders
-    XEventBuffer/                     # bounded channel + pooled-array batching
-    Configurations/                   # strongly-typed config classes
-    XEventSinks/
-      ClickHouse/                     # ClickHouse sink + encoder + queries
-      Postgres/                       # PostgreSQL sink + encoder + queries
-      Kafka/                          # Kafka producer sink
-test/
-  XEventPipeline.IntegrationTests/   # end-to-end tests against real services
-```
-
-## Key dependencies
-
-| Package | Purpose |
-|---|---|
-| `Microsoft.SqlServer.XEvent.XELite` | Live XEvent stream reader |
-| `Microsoft.Data.SqlClient` | SQL Server connectivity |
-| `ClickHouse.Driver` | ClickHouse client |
-| `Npgsql` | PostgreSQL client |
-| `Confluent.Kafka` | Kafka producer |
-| `Polly.Core` | Resilience & retry pipelines |
-| `SpanJson` | High-performance JSON serialisation (Kafka sink) |
-| `NetEscapades.Configuration.Yaml` | YAML configuration provider |
-| `OpenTelemetry.Extensions.Hosting` | Traces, metrics & logs wiring |
-| `OpenTelemetry.Exporter.OpenTelemetryProtocol` | OTLP exporter |
-| `OpenTelemetry.Instrumentation.SqlClient` | SQL Server call instrumentation |
-| `Confluent.Kafka.Extensions.Diagnostics` | Kafka producer tracing |
