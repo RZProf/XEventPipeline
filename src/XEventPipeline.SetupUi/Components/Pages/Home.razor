@@ -1,0 +1,499 @@
+@page "/"
+@using System.Text.Json
+@using Microsoft.Data.SqlClient
+@using Microsoft.Extensions.Configuration
+@inject XEventCatalogService Catalog
+@inject AppSettingsFile SettingsFile
+@inject IConfiguration Configuration
+
+<PageTitle>XEventPipeline setup</PageTitle>
+@if (SaveCompleted)
+{
+    <main class="save-complete" role="status" aria-live="polite">
+        <section class="saved-card">
+            <span class="saved-mark" aria-hidden="true">✓</span>
+            <h1>Configuration updated</h1>
+            <code class="saved-file-path">@SettingsFile.Path</code>
+            <p class="saved-restart-instruction">Close this tab, then run the application without the <code>--configure</code> flag to start the pipeline.</p>
+            <button class="reconfigure-button" @onclick="ReturnToConfiguration">Edit again</button>
+        </section>
+    </main>
+}
+else
+{
+<main class="shell">
+    <header>
+        <div class="eyebrow">XEVENTPIPELINE</div>
+        <h1>Build your pipeline configuration</h1>
+        <p>Connect to SQL Server, choose events and a destination, then save the configuration file used by the application.</p>
+        @if (!string.IsNullOrWhiteSpace(ConfigurationWarning))
+        {
+            <p class="configuration-warning" role="status">@ConfigurationWarning</p>
+        }
+    </header>
+
+    <section class="panel">
+        <div class="section-heading"><span class="step">1</span><div><h2>SQL Server connection</h2><p>Used to read the server's Extended Events catalog.</p></div></div>
+        <div class="property-section-title">Connection</div>
+        <div class="property-grid">
+            <label class="property-row"><span>Server name</span><input @bind="SqlServerHost" placeholder="sql.example.net" /></label>
+            <label class="property-row"><span>Port</span><input type="number" min="1" max="65535" @bind="SqlServerPort" /></label>
+            <label class="property-row"><span>Database</span><input @bind="SqlServerDatabase" /></label>
+        </div>
+        <div class="property-section-title">Authentication</div>
+        <div class="property-grid">
+            <label class="property-row"><span>User name</span><input autocomplete="username" @bind="SqlServerUsername" /></label>
+            <label class="property-row"><span>Password</span><input type="password" autocomplete="new-password" @bind="SqlServerPassword" /></label>
+        </div>
+        <div class="property-section-title">Security</div>
+        <label class="property-row property-checkbox"><span>Trust server certificate</span><input type="checkbox" @bind="SqlServerTrustServerCertificate" /></label>
+        <button class="primary" @onclick="LoadCatalog" disabled="@Busy">@(Busy ? "Loading catalog…" : "Connect and load events")</button>
+        @if (ExistingEvents.Count > 0 && !CatalogLoaded)
+        {
+            <p class="configuration-info" role="status">Existing configuration found: @ExistingEvents.Count event(s) and @ExistingSink. Connect to SQL Server to edit the configured events.</p>
+        }
+        @if (!string.IsNullOrWhiteSpace(Error)) { <p class="error">@Error</p> }
+        @if (CatalogLoaded) { <p class="success">Loaded @Events.Count events and their available actions.</p> }
+    </section>
+
+    @if (CatalogLoaded)
+    {
+        <section class="panel">
+            <div class="section-heading"><span class="step">2</span><div><h2>Choose events</h2><p>Select events, then configure each one independently.</p></div></div>
+            <div class="event-picker-toolbar">
+                <input class="search" @bind="Search" @bind:event="oninput" placeholder="Search event or package name…" />
+                <span class="event-count">@FilteredEventCount matches · @SelectedEvents.Count() selected</span>
+            </div>
+            <div class="event-results">
+                @foreach (var item in VisibleEvents)
+                {
+                    <label class="event-result">
+                        <input type="checkbox" @bind="item.Enabled" />
+                        <span class="event-name">@item.Definition.FullName</span>
+                        <span class="event-description">@(string.IsNullOrWhiteSpace(item.Definition.Description) ? "No description provided." : item.Definition.Description)</span>
+                    </label>
+                }
+                @if (VisibleEventCount < FilteredEventCount)
+                {
+                    <button class="show-more" @onclick="ShowMoreEvents">Show more events (@VisibleEventCount of @FilteredEventCount shown)</button>
+                }
+                else if (FilteredEventCount == 0)
+                {
+                    <p class="muted empty-events">No events match this search.</p>
+                }
+            </div>
+
+            @if (SelectedEvents.Any())
+            {
+                <div class="selected-event-editors">
+                    <div class="subheading">Configure selected events <span>Each event has its own predicate, settings and actions.</span></div>
+                    @foreach (var item in SelectedEvents)
+                    {
+                        <article class="event-card selected-event-card">
+                            <div class="selected-event-heading"><strong>@item.Definition.FullName</strong><button class="remove-event" @onclick="() => item.Enabled = false" aria-label="Remove @item.Definition.FullName">Remove</button></div>
+                            <div class="event-config">
+                                <label>Predicate expression <input @bind="item.Predicate" placeholder="[duration] >= 5000000" /></label>
+                                <div class="subheading">Event settings <span>Optional values supported by this event</span></div>
+                                @if (item.Attributes.Count == 0) { <p class="muted">No customizable settings reported for this event.</p> }
+                                @foreach (var setting in item.Attributes)
+                                {
+                                    <div class="choice-row">
+                                        <label><input type="checkbox" @bind="setting.Selected" /><span><b>@setting.Definition.Name</b><small>@setting.Definition.Description</small></span></label>
+                                        @if (setting.Selected)
+                                        {
+                                            @if (setting.Definition.IsBoolean)
+                                            {
+                                                <select class="value-input" @bind="setting.Value" aria-label="@($"{setting.Definition.Name} value")"><option value="1">True</option><option value="0">False</option></select>
+                                            }
+                                            else
+                                            {
+                                                <input class="value-input" @bind="setting.Value" aria-label="@($"{setting.Definition.Name} value")" />
+                                            }
+                                        }
+                                    </div>
+                                }
+                                <div class="subheading">Actions <span>Select the actions to attach to this event</span></div>
+                                <div class="action-picker-toolbar">
+                                    <input class="search" @bind="item.ActionSearch" @bind:event="oninput" placeholder="Search actions by name or description…" />
+                                    <span class="event-count">@item.FilteredActionCount matches · @item.Actions.Count(a => a.Selected) selected</span>
+                                </div>
+                                <div class="action-grid">
+                                    @foreach (var action in item.VisibleActions)
+                                    {
+                                        <label class="action-option" title="@action.Definition.Description"><input type="checkbox" @bind="action.Selected" /><span><b>@action.Definition.FullName</b><small>@action.Definition.Description</small></span></label>
+                                    }
+                                </div>
+                                @if (item.VisibleActionCount < item.FilteredActionCount)
+                                {
+                                    <button class="show-more action-show-more" @onclick="item.ShowMoreActions">Show more actions (@item.VisibleActionCount of @item.FilteredActionCount shown)</button>
+                                }
+                                else if (item.FilteredActionCount == 0)
+                                {
+                                    <p class="muted">No actions match this search.</p>
+                                }
+                                <details><summary>Event fields emitted automatically (@item.Definition.Fields.Count)</summary><p class="muted">SQL Server includes this event's data fields in each captured event. Actions above add values; fields cannot be toggled in a CREATE EVENT SESSION definition. This list is useful when writing predicates.</p><ul class="field-list">@foreach (var field in item.Definition.Fields) { <li><code>@field.Name</code><span>@field.Description</span></li> }</ul></details>
+                            </div>
+                        </article>
+                    }
+                </div>
+            }
+        </section>
+    }
+
+        <section class="panel">
+            <div class="section-heading"><span class="step">3</span><div><h2>Choose one sink</h2><p>Provide the connection details for the destination.</p></div></div>
+            <label>Sink
+                <select @bind="Sink"><option value="ClickHouse">ClickHouse</option><option value="Postgres">PostgreSQL</option><option value="Kafka">Kafka</option></select>
+            </label>
+            @if (Sink == "ClickHouse")
+            {
+                <div class="property-section-title">Connection</div>
+                <div class="property-grid">
+                    <label class="property-row"><span>Server name</span><input @bind="ClickHouseHost" placeholder="clickhouse.example.net" /></label>
+                    <label class="property-row"><span>HTTP port</span><input type="number" min="1" max="65535" @bind="ClickHousePort" /></label>
+                    <label class="property-row"><span>Database</span><input @bind="ClickHouseDatabase" /></label>
+                    <label class="property-row"><span>Protocol</span><select @bind="ClickHouseProtocol"><option>http</option><option>https</option></select></label>
+                </div>
+                <div class="property-section-title">Authentication</div>
+                <div class="property-grid">
+                    <label class="property-row"><span>User name</span><input autocomplete="username" @bind="ClickHouseUsername" /></label>
+                    <label class="property-row"><span>Password</span><input type="password" autocomplete="new-password" @bind="ClickHousePassword" /></label>
+                </div>
+                <div class="property-section-title">Table and batching</div>
+                <div class="property-grid">
+                    <label class="property-row"><span>Table</span><input @bind="Table" /></label>
+                    <label class="property-row"><span>Batch size</span><input type="number" min="1" @bind="BatchSize" /></label>
+                    <label class="property-row"><span>Compression</span><select @bind="Compression"><option>None</option><option>GZip</option></select></label>
+                </div>
+            }
+            else if (Sink == "Postgres")
+            {
+                <div class="property-section-title">Connection</div>
+                <div class="property-grid">
+                    <label class="property-row"><span>Server name</span><input @bind="PostgresHost" placeholder="postgres.example.net" /></label>
+                    <label class="property-row"><span>Port</span><input type="number" min="1" max="65535" @bind="PostgresPort" /></label>
+                    <label class="property-row"><span>Database</span><input @bind="PostgresDatabase" /></label>
+                </div>
+                <div class="property-section-title">Authentication</div>
+                <div class="property-grid">
+                    <label class="property-row"><span>User name</span><input autocomplete="username" @bind="PostgresUsername" /></label>
+                    <label class="property-row"><span>Password</span><input type="password" autocomplete="new-password" @bind="PostgresPassword" /></label>
+                    <label class="property-row"><span>SSL mode</span><select @bind="PostgresSslMode"><option>Prefer</option><option>Require</option><option>Disable</option><option>VerifyCA</option><option>VerifyFull</option></select></label>
+                </div>
+                <div class="property-section-title">Table and batching</div>
+                <div class="property-grid">
+                    <label class="property-row"><span>Table</span><input @bind="Table" /></label>
+                    <label class="property-row"><span>Batch size</span><input type="number" min="1" @bind="BatchSize" /></label>
+                </div>
+            }
+            else
+            {
+                <div class="property-grid">
+                    <label class="property-row"><span>Broker address</span><input @bind="BrokerAddress" placeholder="broker:9092" /></label>
+                    <label class="property-row"><span>Topic</span><input @bind="Topic" /></label>
+                    <label class="property-row"><span>Batch size</span><input type="number" min="1" @bind="BatchSize" /></label>
+                    <label class="property-row"><span>Compression</span><select @bind="Compression"><option>None</option><option>Gzip</option><option>Snappy</option><option>Lz4</option><option>Zstd</option></select></label>
+                </div>
+            }
+        </section>
+
+        <section class="panel">
+            <div class="section-heading"><span class="step">4</span><div><h2>Pipeline buffering</h2><p>Set the maximum number of events held in memory while waiting for the sink.</p></div></div>
+            <div class="property-grid">
+                <label class="property-row"><span>Event buffer capacity</span><input type="number" min="1" @bind="BoundedCapacity" /></label>
+            </div>
+        </section>
+
+        <section class="finish">
+            <div><h2>Save configuration</h2><p>@(ConfiguredEventCount) selected event(s) · @Sink</p><small class="save-path">@SettingsFile.Path</small></div>
+            <div class="save-controls">
+                <button class="primary" @onclick="Save" disabled="@(!CanSave || Saving)">@(Saving ? "Saving…" : "Save appsettings.yml")</button>
+                @if (!string.IsNullOrWhiteSpace(SaveError)) { <p class="save-feedback error" role="alert">@SaveError</p> }
+            </div>
+        </section>
+    <footer>Event descriptions, fields and actions come from the connected SQL Server instance.</footer>
+</main>
+}
+
+@code {
+    private string SqlServerHost { get; set; } = "";
+    private int SqlServerPort { get; set; } = 1433;
+    private string SqlServerDatabase { get; set; } = "master";
+    private string SqlServerUsername { get; set; } = "";
+    private string SqlServerPassword { get; set; } = "";
+    private bool SqlServerTrustServerCertificate { get; set; } = true;
+    private string ClickHouseHost { get; set; } = "";
+    private int ClickHousePort { get; set; } = 8123;
+    private string ClickHouseDatabase { get; set; } = "default";
+    private string ClickHouseUsername { get; set; } = "default";
+    private string ClickHousePassword { get; set; } = "";
+    private string ClickHouseProtocol { get; set; } = "http";
+    private string PostgresHost { get; set; } = "";
+    private int PostgresPort { get; set; } = 5432;
+    private string PostgresDatabase { get; set; } = "";
+    private string PostgresUsername { get; set; } = "";
+    private string PostgresPassword { get; set; } = "";
+    private string PostgresSslMode { get; set; } = "Prefer";
+    private string BrokerAddress { get; set; } = "";
+    private string Topic { get; set; } = "";
+    private string Table { get; set; } = "xe_data";
+    private string Sink { get; set; } = "ClickHouse";
+    private string Compression { get; set; } = "None";
+    private string Search { get; set; } = "";
+    private int VisibleEventCount { get; set; } = 20;
+    private int BatchSize { get; set; } = 10000;
+    private int BoundedCapacity { get; set; } = 100000;
+    private bool Busy { get; set; }
+    private bool Saving { get; set; }
+    private bool CatalogLoaded { get; set; }
+    private string? Error { get; set; }
+    private bool SaveCompleted { get; set; }
+    private string? SaveError { get; set; }
+    private string? ConfigurationWarning { get; set; }
+    private List<EventSetup> Events { get; set; } = [];
+    private List<SavedEventConfiguration> ExistingEvents { get; set; } = [];
+    private string ExistingSink { get; set; } = "";
+    private IEnumerable<EventSetup> FilteredEvents => Events.Where(x => string.IsNullOrWhiteSpace(Search) || x.Definition.FullName.Contains(Search, StringComparison.OrdinalIgnoreCase) || x.Definition.Description.Contains(Search, StringComparison.OrdinalIgnoreCase));
+    private IEnumerable<EventSetup> VisibleEvents => FilteredEvents.Take(VisibleEventCount);
+    private int FilteredEventCount => FilteredEvents.Count();
+    private IEnumerable<EventSetup> SelectedEvents => Events.Where(x => x.Enabled);
+    private int ConfiguredEventCount => CatalogLoaded ? SelectedEvents.Count() : ExistingEvents.Count;
+    private bool CanSave => ConfiguredEventCount > 0 && BatchSize > 0 && BoundedCapacity > 0 && (Sink == "Kafka"
+        ? !string.IsNullOrWhiteSpace(BrokerAddress) && !string.IsNullOrWhiteSpace(Topic)
+        : !string.IsNullOrWhiteSpace(Table) && (Sink == "ClickHouse"
+            ? !string.IsNullOrWhiteSpace(ClickHouseHost)
+            : !string.IsNullOrWhiteSpace(PostgresHost)));
+
+    protected override void OnInitialized()
+    {
+        ConfigurationWarning = Configuration["Setup:ConfigurationWarning"];
+        try
+        {
+            LoadExistingConfiguration();
+        }
+        catch (Exception)
+        {
+            ResetToEmptyConfiguration();
+            ConfigurationWarning = "The existing appsettings.yml contains settings the setup page could not read and was ignored. Saving will replace it.";
+        }
+    }
+
+    private void ResetToEmptyConfiguration()
+    {
+        SqlServerHost = ""; SqlServerPort = 1433; SqlServerDatabase = "master"; SqlServerUsername = ""; SqlServerPassword = ""; SqlServerTrustServerCertificate = true;
+        ClickHouseHost = ""; ClickHousePort = 8123; ClickHouseDatabase = "default"; ClickHouseUsername = "default"; ClickHousePassword = ""; ClickHouseProtocol = "http";
+        PostgresHost = ""; PostgresPort = 5432; PostgresDatabase = ""; PostgresUsername = ""; PostgresPassword = ""; PostgresSslMode = "Prefer";
+        BrokerAddress = ""; Topic = ""; Table = "xe_data"; Sink = "ClickHouse"; ExistingSink = ""; Compression = "None";
+        BatchSize = 10000; BoundedCapacity = 100000; ExistingEvents.Clear();
+    }
+
+    private void LoadExistingConfiguration()
+    {
+        BoundedCapacity = GetConfigurationInt("Settings:BoundedCapacity", BoundedCapacity);
+        var sqlConnection = Configuration["SqlServer:ConnectionString"];
+        if (!string.IsNullOrWhiteSpace(sqlConnection))
+        {
+            var sql = new SqlConnectionStringBuilder(sqlConnection);
+            var source = sql.DataSource;
+            var comma = source.LastIndexOf(',');
+            if (comma > 0 && int.TryParse(source[(comma + 1)..], out var sqlPort))
+            {
+                SqlServerHost = source[..comma];
+                SqlServerPort = sqlPort;
+            }
+            else SqlServerHost = source;
+            SqlServerDatabase = sql.InitialCatalog;
+            SqlServerUsername = sql.UserID;
+            SqlServerPassword = sql.Password;
+            SqlServerTrustServerCertificate = sql.TrustServerCertificate;
+        }
+
+        var events = Configuration.GetSection("SqlServer:Events");
+        ExistingEvents = events.GetChildren().Select(section => new SavedEventConfiguration(
+            section["Name"] ?? "",
+            section["PredicateExpression"] ?? "",
+            section.GetSection("Actions").GetChildren().Select(action => action.Value ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase),
+            section.GetSection("CustomizableAttributes").GetChildren().ToDictionary(
+                attribute => attribute["Name"] ?? "",
+                attribute => attribute["Value"] ?? "",
+                StringComparer.OrdinalIgnoreCase))).Where(x => !string.IsNullOrWhiteSpace(x.Name)).ToList();
+
+        if (!string.IsNullOrWhiteSpace(Configuration["ClickHouse:ConnectionString"]))
+        {
+            Sink = ExistingSink = "ClickHouse";
+            var clickHouse = new System.Data.Common.DbConnectionStringBuilder { ConnectionString = Configuration["ClickHouse:ConnectionString"]! };
+            ClickHouseHost = GetConnectionValue(clickHouse, "Host", ClickHouseHost);
+            ClickHousePort = GetConnectionInt(clickHouse, "Port", ClickHousePort);
+            ClickHouseDatabase = GetConnectionValue(clickHouse, "Database", ClickHouseDatabase);
+            ClickHouseUsername = GetConnectionValue(clickHouse, "Username", ClickHouseUsername);
+            ClickHousePassword = GetConnectionValue(clickHouse, "Password", ClickHousePassword);
+            ClickHouseProtocol = GetConnectionValue(clickHouse, "Protocol", ClickHouseProtocol);
+            Table = Configuration["ClickHouse:Table"] ?? Table;
+            BatchSize = GetConfigurationInt("ClickHouse:BatchSize", BatchSize);
+            Compression = Configuration["ClickHouse:Compression"] ?? Compression;
+        }
+        else if (!string.IsNullOrWhiteSpace(Configuration["Postgres:ConnectionString"]))
+        {
+            Sink = ExistingSink = "Postgres";
+            var postgres = new Npgsql.NpgsqlConnectionStringBuilder(Configuration["Postgres:ConnectionString"]);
+            PostgresHost = postgres.Host ?? ""; PostgresPort = postgres.Port; PostgresDatabase = postgres.Database ?? "";
+            PostgresUsername = postgres.Username ?? ""; PostgresPassword = postgres.Password ?? ""; PostgresSslMode = postgres.SslMode.ToString();
+            Table = Configuration["Postgres:Table"] ?? Table;
+            BatchSize = GetConfigurationInt("Postgres:BatchSize", BatchSize);
+        }
+        else if (!string.IsNullOrWhiteSpace(Configuration["Kafka:BrokerAddress"]))
+        {
+            Sink = ExistingSink = "Kafka";
+            BrokerAddress = Configuration["Kafka:BrokerAddress"]!;
+            Topic = Configuration["Kafka:Topic"] ?? Topic;
+            BatchSize = GetConfigurationInt("Kafka:BatchSize", BatchSize);
+            Compression = Configuration["Kafka:CompressionType"] ?? Compression;
+        }
+    }
+
+    private string GetConnectionValue(System.Data.Common.DbConnectionStringBuilder builder, string key, string fallback) =>
+        builder.TryGetValue(key, out var value) ? Convert.ToString(value) ?? fallback : fallback;
+
+    private int GetConnectionInt(System.Data.Common.DbConnectionStringBuilder builder, string key, int fallback) =>
+        builder.TryGetValue(key, out var value) && int.TryParse(Convert.ToString(value), out var parsed) ? parsed : fallback;
+
+    private int GetConfigurationInt(string key, int fallback) => int.TryParse(Configuration[key], out var parsed) ? parsed : fallback;
+
+    private void ShowMoreEvents() => VisibleEventCount += 20;
+
+    private void ReturnToConfiguration()
+    {
+        SaveCompleted = false;
+        SaveError = null;
+        ConfigurationWarning = null;
+    }
+
+    private async Task LoadCatalog()
+    {
+        Busy = true; Error = null; CatalogLoaded = false;
+        try
+        {
+            var connectionString = ConnectionStringFactory.BuildSqlServer(SqlServerHost, SqlServerPort, SqlServerDatabase, SqlServerUsername, SqlServerPassword, SqlServerTrustServerCertificate);
+            var definitions = await Catalog.LoadAsync(connectionString, CancellationToken.None);
+            Events = definitions.Select(definition => new EventSetup(definition, ExistingEvents.FirstOrDefault(saved => saved.Name.Equals(definition.FullName, StringComparison.OrdinalIgnoreCase)))).ToList();
+            VisibleEventCount = 20;
+            CatalogLoaded = true;
+        }
+        catch (Exception ex) { Error = $"Could not load the SQL Server event catalog: {ex.Message}"; }
+        finally { Busy = false; }
+    }
+
+    private async Task Save()
+    {
+        if (!CanSave) return;
+        Saving = true;
+        SaveCompleted = false;
+        SaveError = null;
+        try
+        {
+            await SettingsFile.SaveAsync(BuildYaml());
+            SaveCompleted = true;
+        }
+        catch (Exception ex) { SaveError = $"Could not save the configuration file: {ex.Message}"; }
+        finally { Saving = false; }
+    }
+
+    private string BuildYaml()
+    {
+        var sqlServerConnectionString = ConnectionStringFactory.BuildSqlServer(SqlServerHost, SqlServerPort, SqlServerDatabase, SqlServerUsername, SqlServerPassword, SqlServerTrustServerCertificate);
+        var lines = new List<string> { "Settings:", $"  BoundedCapacity: {BoundedCapacity}", "", "SqlServer:", $"  ConnectionString: {Quote(sqlServerConnectionString)}", "  Events:" };
+        if (CatalogLoaded)
+        {
+            foreach (var item in SelectedEvents)
+            {
+                lines.Add($"    - Name: {Quote(item.Definition.FullName)}");
+                var attributes = item.Attributes.Where(a => a.Selected).ToArray();
+                if (attributes.Length > 0)
+                {
+                    lines.Add("      CustomizableAttributes:");
+                    foreach (var attribute in attributes) { lines.Add($"        - Name: {Quote(attribute.Definition.Name)}"); lines.Add($"          Value: {Quote(attribute.Value)}"); }
+                }
+                var actions = item.Actions.Where(a => a.Selected).ToArray();
+                if (actions.Length > 0) { lines.Add("      Actions:"); lines.AddRange(actions.Select(a => $"        - {Quote(a.Definition.FullName)}")); }
+                else lines.Add("      Actions: []");
+                if (!string.IsNullOrWhiteSpace(item.Predicate)) lines.Add($"      PredicateExpression: {Quote(item.Predicate)}");
+            }
+        }
+        else
+        {
+            foreach (var item in ExistingEvents)
+            {
+                lines.Add($"    - Name: {Quote(item.Name)}");
+                if (item.Attributes.Count > 0)
+                {
+                    lines.Add("      CustomizableAttributes:");
+                    foreach (var attribute in item.Attributes) { lines.Add($"        - Name: {Quote(attribute.Key)}"); lines.Add($"          Value: {Quote(attribute.Value)}"); }
+                }
+                lines.Add(item.Actions.Count > 0 ? "      Actions:" : "      Actions: []");
+                if (item.Actions.Count > 0) lines.AddRange(item.Actions.Select(action => $"        - {Quote(action)}"));
+                if (!string.IsNullOrWhiteSpace(item.Predicate)) lines.Add($"      PredicateExpression: {Quote(item.Predicate)}");
+            }
+        }
+        lines.Add("");
+        if (Sink == "ClickHouse")
+        {
+            var connectionString = ConnectionStringFactory.BuildClickHouse(ClickHouseHost, ClickHousePort, ClickHouseDatabase, ClickHouseUsername, ClickHousePassword, ClickHouseProtocol);
+            lines.Add("ClickHouse:"); lines.Add($"  ConnectionString: {Quote(connectionString)}"); lines.Add($"  Table: {Quote(Table)}"); lines.Add($"  BatchSize: {BatchSize}"); lines.Add("  MaxDegreeOfParallelism: 4"); lines.Add($"  Compression: {Compression}");
+        }
+        else if (Sink == "Postgres")
+        {
+            var connectionString = ConnectionStringFactory.BuildPostgres(PostgresHost, PostgresPort, PostgresDatabase, PostgresUsername, PostgresPassword, PostgresSslMode);
+            lines.Add("Postgres:"); lines.Add($"  ConnectionString: {Quote(connectionString)}"); lines.Add($"  Table: {Quote(Table)}"); lines.Add($"  BatchSize: {BatchSize}"); lines.Add("  MaxDegreeOfParallelism: 4");
+        }
+        else
+        {
+            lines.Add("Kafka:"); lines.Add($"  BrokerAddress: {Quote(BrokerAddress)}"); lines.Add($"  Topic: {Quote(Topic)}"); lines.Add($"  CompressionType: {Compression}"); lines.Add("  LingerMs: 5"); lines.Add($"  BatchSize: {BatchSize}"); lines.Add("  MaxDegreeOfParallelism: 10"); lines.Add("  ProduceTimeout: 1000");
+        }
+        return string.Join(Environment.NewLine, lines) + Environment.NewLine;
+    }
+
+    private static string Quote(string value) => JsonSerializer.Serialize(value);
+
+    private sealed record SavedEventConfiguration(string Name, string Predicate, HashSet<string> Actions, Dictionary<string, string> Attributes);
+
+    private sealed class EventSetup(XEventDefinition definition, SavedEventConfiguration? saved)
+    {
+        public XEventDefinition Definition { get; } = definition;
+        public bool Enabled { get; set; } = saved is not null;
+        public string Predicate { get; set; } = saved?.Predicate ?? "";
+        public string ActionSearch { get; set; } = "";
+        public int VisibleActionCount { get; private set; } = 12;
+        public List<AttributeSetup> Attributes { get; } = definition.CustomizableAttributes.Select(x => new AttributeSetup(x, saved)).ToList();
+        public List<ActionSetup> Actions { get; } = definition.Actions.Select(x => new ActionSetup(x, saved?.Actions.Contains(x.FullName) == true)).ToList();
+        public IEnumerable<ActionSetup> FilteredActions => Actions.Where(x => string.IsNullOrWhiteSpace(ActionSearch) || x.Definition.FullName.Contains(ActionSearch, StringComparison.OrdinalIgnoreCase) || x.Definition.Description.Contains(ActionSearch, StringComparison.OrdinalIgnoreCase));
+        public IEnumerable<ActionSetup> VisibleActions => FilteredActions.Take(VisibleActionCount);
+        public int FilteredActionCount => FilteredActions.Count();
+        public void ShowMoreActions() => VisibleActionCount += 12;
+    }
+    private sealed class AttributeSetup(XEventColumn definition, SavedEventConfiguration? saved)
+    {
+        public XEventColumn Definition { get; } = definition;
+        public bool Selected { get; set; } = saved?.Attributes.ContainsKey(definition.Name) == true;
+        public string Value { get; set; } = NormalizeValue(definition, saved?.Attributes.GetValueOrDefault(definition.Name));
+
+        private static string NormalizeValue(XEventColumn definition, string? value)
+        {
+            if (definition.IsBoolean)
+            {
+                return (value ?? definition.DefaultValue).Trim().ToLowerInvariant() switch
+                {
+                    "true" or "1" => "1",
+                    "false" or "0" => "0",
+                    _ => "1"
+                };
+            }
+
+            return string.IsNullOrEmpty(value) ? (string.IsNullOrEmpty(definition.DefaultValue) ? "1" : definition.DefaultValue) : value;
+        }
+    }
+    private sealed class ActionSetup(XEventAction definition, bool selected)
+    {
+        public XEventAction Definition { get; } = definition;
+        public bool Selected { get; set; } = selected;
+    }
+}

@@ -34,10 +34,12 @@ public class XEventConfiguration
         var predicateExpression = string.IsNullOrWhiteSpace(PredicateExpression)
             ? null
             : $"{Environment.NewLine}WHERE ({PredicateExpression})";
+        var actions = Actions.Length == 0
+            ? null
+            : $"{Environment.NewLine}ACTION({string.Join(',', Actions)})";
 
         return $"""
-                EVENT {Name}({customizableAttributes}
-                ACTION({string.Join(',', Actions)}){predicateExpression})
+                EVENT {Name}({customizableAttributes}{actions}{predicateExpression})
                 """;
     }
 }
@@ -49,6 +51,13 @@ public class XEventCustomizableAttributeConfiguration
 
     public override string ToString()
     {
-        return $"{Name}=({Value})";
+        var sqlValue = Value.Trim().ToLowerInvariant() switch
+        {
+            "true" => "1",
+            "false" => "0",
+            _ => Value
+        };
+
+        return $"{Name}=({sqlValue})";
     }
 }
